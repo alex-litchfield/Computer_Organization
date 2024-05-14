@@ -1,0 +1,259 @@
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+
+// Struct
+struct Instruction {
+    char mips[128];
+    char operator[5];
+    char d1[5];
+    char d2[5];
+    char o[5];
+} default_instruction = {.operator = "\0", .mips = "\0", .d1 = "\0", .d2 = "\0", .o = "\0"};
+
+struct Line {
+    struct Instruction instruction;
+    char cols[9][5];
+    int stage;
+    int started_at;
+    int nop_at;
+};
+
+// Init Global Vars
+struct Line board[128];
+char stages[5][4] = {"IF", "ID", "EX", "MEM", "WB"};
+char nop_1_stage[5][4] = {"IF", "ID", "*", "*", "*"};
+char nop_2_stage[6][4] = {"IF", "ID", "ID", "*", "*", "*"};
+int line_num = 0;
+int real_exec_line = 0;
+int current_cycle = 0;
+
+// Helper
+int not_empty(const char *c) {
+  return c[0] != '\0';
+}
+
+int is_nop_1(struct Line *l) {
+  return strcmp(l->instruction.operator, "nop1") == 0;
+}
+
+int is_nop_2(struct Line *l) {
+  return strcmp(l->instruction.operator, "nop2") == 0;
+}
+
+int compare_dep(struct Instruction *i, char *d1, char *d2) {
+  return (not_empty(d1) && strcmp(i->o, d1) == 0) || (not_empty(d2) && strcmp(i->o, d2) == 0);
+}
+
+int has_dep(struct Instruction *i, char *d) {
+  return not_empty(d) && ((not_empty(i->d1) && strcmp(i->d1, d) == 0) || (not_empty(i->d2) && strcmp(i->d2, d) == 0));
+}
+
+void read_parts(const char *line, int *i, char *reg, int strLen) {
+  int j;
+  for (j = *i; j < strLen; j++) {
+    if (line[j] == '$') {
+      // Here we have a Register
+      // Read next two
+      reg[0] = line[j + 1];
+      reg[1] = line[j + 2];
+      reg[2] = '\0';
+      j = j + 3;
+      break;
+    }
+  }
+
+  *i = j; // Assign Offset
+}
+
+void print_all() {
+  printf("CPU Cycles ===>\t1\t2\t3\t4\t5\t6\t7\t8\t9\n");
+  int i;
+  for (i = 0; i < line_num; i++) {
+    // Current Cycle, Each of them have their own stages
+    if (is_nop_1(&board[i]) && current_cycle > board[i].started_at + 1) {
+        printf("nop\t\t");
+    } 
+    else if (is_nop_2(&board[i]) && current_cycle > board[i].started_at + 2) {
+        printf("nop\t\t");
+    } 
+    else {
+        printf("%s\t", board[i].instruction.mips);
+    }
+    for (int j = 0; j < 8; j++) {
+        printf("%s\t", board[i].cols[j]);
+    }
+    printf("%s\n", board[i].cols[8]);
+  }
+  printf("\n");
+}
+
+int run_one_stimulation() {
+  // First line
+  // #5 will be the final
+  if (board[0].stage < 5) {
+    strcpy(board[0].cols[current_cycle], stages[board[0].stage]);
+    board[0].stage++;
+  }
+
+  // Rest
+  int i;
+  for (i = 1; i < line_num; i++) {
+    if (current_cycle >= board[i].started_at) {
+      if (is_nop_2(&board[i]) && board[i].stage < 6) {
+        strcpy(board[i].cols[current_cycle], nop_2_stage[board[i].stage]);
+        board[i].stage++;
+      } 
+      else if (is_nop_1(&board[i]) && board[i].stage < 5) {
+        strcpy(board[i].cols[current_cycle], nop_1_stage[board[i].stage]);
+        board[i].stage++;
+      } 
+      else {
+        if (board[i].stage < 5) {
+          // Check dep
+          if (board[i].nop_at != -1) {
+            if (board[board[i].nop_at].stage != 5 && board[i].stage == 1) {
+              strcpy(board[i].cols[current_cycle], stages[board[i].stage]);
+            } 
+            else {
+              strcpy(board[i].cols[current_cycle], stages[board[i].stage]);
+              board[i].stage++;
+            }
+          } 
+          else {
+            strcpy(board[i].cols[current_cycle], stages[board[i].stage]);
+            if (board[i - 1].stage == 5 || board[i - 1].stage - board[i].stage > 1) {
+              // If the previous block, wait for it
+              board[i].stage++;
+            }
+          }
+        }
+      }
+    }
+  }
+  return board[line_num - 1].stage == 5;
+}
+
+int main(int argc, char *argv[]) {
+  if (argc < 2) {
+    fprintf(stderr, "Missing Parameters\n");
+    return EXIT_FAILURE;
+  }
+
+  // Open input file
+  FILE *file = fopen(argv[1], "r");
+
+  // Init
+  for (int i = 0; i < 128; i++) {
+    board[i].instruction = default_instruction;
+    board[i].stage = 0;
+    board[i].started_at = 0;
+    board[i].nop_at = -1;
+    for (int j = 0; j < 9; ++j) {
+        strcpy(board[i].cols[j], ".");
+    }
+  }
+
+  // Processing & Dependency Check
+  char current_line[128];
+  while (fgets(current_line, 128, file)) {
+    // Remove the last newline
+    current_line[strcspn(current_line, "\n")] = '\0';
+    int strLen = strlen(current_line);
+
+    // Parsing line
+    int i = 0;
+    char o[5];
+    char d1[5];
+    char d2[5];
+    // Read Instruction type
+    char inst[5];
+    int index = 0;
+    int j;
+    for (j = i; j < strLen; j++) {
+        if (current_line[j] != ' ') {
+            inst[index] = current_line[j];
+            index++;
+        } 
+        else {
+            inst[index] = '\0';
+            i = j + 1;
+            break;
+        }
+    }
+
+    // Identify type
+    if (strcmp(inst, "add") == 0 || strcmp(inst, "and") == 0 || strcmp(inst, "or") == 0 || strcmp(inst, "sub") == 0) {
+      read_parts(current_line, &i, o, strLen);
+      read_parts(current_line, &i, d1, strLen);
+      read_parts(current_line, &i, d2, strLen);
+    } 
+    else if (strcmp(inst, "addi") == 0 || strcmp(inst, "lw") == 0 || strcmp(inst, "andi") == 0 || strcmp(inst, "ori") == 0) {
+      read_parts(current_line, &i, o, strLen);
+      read_parts(current_line, &i, d1, strLen);
+    } 
+    else if (strcmp(inst, "sw") == 0) {
+      read_parts(current_line, &i, d1, strLen);
+      read_parts(current_line, &i, d2, strLen);
+    } 
+    else {
+      fprintf(stderr, "Unknown Reg type: '%s'\n", inst);
+    } // End of Var detect
+    // Start of dependency detect
+    // add $t0,$s2,$s3
+    // addi $t1,$t3,73
+    // or $s0,$s0,$t3
+    // lw $a0,12($sp)
+    // sw $t6,32($a1)
+    int nops_at = -1;
+    for (int j = line_num - 1; j >= 0; j--) {
+      if (!(is_nop_1(&board[j]) && is_nop_2(&board[j]))) {
+        // Find if there is a dependency
+        if (compare_dep(&board[j].instruction, d1, d2)) {
+          // Compute distance
+          int dist = line_num - board[j].started_at;
+          if (dist > 0 && dist < 3) {
+            // One bubble
+            // Wait! Check if it is waited
+            // If the dep is not the nearest line, the last line may have waited for the dep for you
+            if (j == line_num - 1 ||
+                !has_dep(&board[line_num - 1].instruction, board[j].instruction.o)) {
+              nops_at = j;
+              strcpy(board[line_num].instruction.operator, "nop1");
+              board[line_num].started_at = real_exec_line;
+              line_num++;
+              if (dist == 1) {
+                strcpy(board[line_num].instruction.operator, "nop2");
+                board[line_num].started_at = real_exec_line;
+                line_num++;
+              }
+            }
+          }
+          break; // Dep Found, if it is not qualify, then we don't need to worried about it anymore.
+        }
+      }
+    }
+    // Assign current line
+    strcpy(board[line_num].instruction.mips, current_line);
+    strcpy(board[line_num].instruction.operator, inst);
+    strcpy(board[line_num].instruction.d1, d1);
+    strcpy(board[line_num].instruction.d2, d2);
+    strcpy(board[line_num].instruction.o, o);
+    board[line_num].started_at = real_exec_line;
+    board[line_num].nop_at = nops_at;
+    line_num++;
+    real_exec_line++;
+  }// Finish Parsing
+  fclose(file);
+  printf("START OF SIMULATION\n\n");
+  while (current_cycle < 9) {
+    if (run_one_stimulation()) {
+      print_all();
+      break;
+    }
+    print_all();
+    current_cycle++;
+  }
+  printf("END OF SIMULATION");
+  return EXIT_SUCCESS;
+}
